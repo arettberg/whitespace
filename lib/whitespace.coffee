@@ -3,6 +3,7 @@
 
 module.exports =
 class Whitespace
+  modifiedLines: [],
   constructor: () ->
     @subscriptions = new CompositeDisposable
     @subscriptions.add atom.workspace.observeTextEditors (editor) =>
@@ -33,7 +34,9 @@ class Whitespace
         if atom.config.get('whitespace-enhanced.ensureSingleTrailingNewline', scope: scopeDescriptor)
           @ensureSingleTrailingNewline(editor)
 
-    editorTextInsertedSubscription = editor.onDidInsertText (event) ->
+    editorTextInsertedSubscription = editor.onDidInsertText (event) =>
+      @getModifiedLines(editor)
+
       return unless event.text is '\n'
       return unless buffer.isRowBlank(event.range.start.row)
 
@@ -62,14 +65,15 @@ class Whitespace
     ignoreWhitespaceOnlyLines = atom.config.get('whitespace-enhanced.ignoreWhitespaceOnlyLines', scope: scopeDescriptor)
     ignoreUnmodifiedLines = atom.config.get('whitespace-enhanced.ignoreUnmodifiedLines', scope: scopeDescriptor)
 
-    promise = if ignoreUnmodifiedLines
-      @getModifiedLines(editor)
-    else
-      Promise.resolve()
+    # promise = if ignoreUnmodifiedLines
+    #   @getModifiedLines(editor)
+    # else
+    #   Promise.resolve()
 
-    promise.then (modifiedLines) ->
-      buffer.backwardsScan /[ \t]+$/g, ({lineText, match, replace, range}) ->
-        return if ignoreUnmodifiedLines and !((range.start.row + 1) in modifiedLines)
+    # promise.then (modifiedLines) ->
+    buffer.backwardsScan /[ \t]+$/g, ({lineText, match, replace, range}) =>
+      try
+        return if ignoreUnmodifiedLines and !((range.start.row + 1) in @modifiedLines)
 
         whitespaceRow = buffer.positionForCharacterIndex(match.index).row
         cursorRows = (cursor.getBufferRow() for cursor in editor.getCursors())
@@ -84,6 +88,8 @@ class Whitespace
           replace('') unless whitespace.length >= 2 and whitespace isnt lineText
         else
           replace('')
+      catch error
+        console.error error
 
   ensureSingleTrailingNewline: (editor) ->
     buffer = editor.getBuffer()
@@ -119,18 +125,20 @@ class Whitespace
 
     if path = editor?.getPath()
       @repository?.getLineDiffs(path, editor.getText())
-        .catch (e) ->
+        .catch (e) =>
           if e.message.match(/does not exist in the given tree/)
             []
           else
             Promise.reject(e)
         .then (diffs) =>
-          return diffs.reduce (lines, val) ->
+          modLines = diffs.reduce (lines, val) ->
             lineNumber = val.newStart
             lines.push(lineNumber++) for i in [0...val.newLines]
 
             return lines
           , []
+
+          @modifiedLines = modLines
 
         .catch (e) ->
           console.error('Error getting line diffs for ' + path + ':')
