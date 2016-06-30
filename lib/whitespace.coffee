@@ -1,20 +1,22 @@
 {CompositeDisposable} = require 'atom'
+{repositoryForPath} = require './helpers'
 
 module.exports =
 class Whitespace
-  constructor: ->
+  constructor: () ->
     @subscriptions = new CompositeDisposable
     @subscriptions.add atom.workspace.observeTextEditors (editor) =>
       @handleEvents(editor)
+      @subscribeToRepository(editor)
 
     @subscriptions.add atom.commands.add 'atom-workspace',
-      'whitespace:remove-trailing-whitespace': =>
+      'whitespace-enhanced:remove-trailing-whitespace': =>
         if editor = atom.workspace.getActiveTextEditor()
           @removeTrailingWhitespace(editor, editor.getGrammar().scopeName)
-      'whitespace:convert-tabs-to-spaces': =>
+      'whitespace-enhanced:convert-tabs-to-spaces': =>
         if editor = atom.workspace.getActiveTextEditor()
           @convertTabsToSpaces(editor)
-      'whitespace:convert-spaces-to-tabs': =>
+      'whitespace-enhanced:convert-spaces-to-tabs': =>
         if editor = atom.workspace.getActiveTextEditor()
           @convertSpacesToTabs(editor)
 
@@ -26,9 +28,9 @@ class Whitespace
     bufferSavedSubscription = buffer.onWillSave =>
       buffer.transact =>
         scopeDescriptor = editor.getRootScopeDescriptor()
-        if atom.config.get('whitespace.removeTrailingWhitespace', scope: scopeDescriptor)
+        if atom.config.get('whitespace-enhanced.removeTrailingWhitespace', scope: scopeDescriptor)
           @removeTrailingWhitespace(editor, editor.getGrammar().scopeName)
-        if atom.config.get('whitespace.ensureSingleTrailingNewline', scope: scopeDescriptor)
+        if atom.config.get('whitespace-enhanced.ensureSingleTrailingNewline', scope: scopeDescriptor)
           @ensureSingleTrailingNewline(editor)
 
     editorTextInsertedSubscription = editor.onDidInsertText (event) ->
@@ -36,8 +38,8 @@ class Whitespace
       return unless buffer.isRowBlank(event.range.start.row)
 
       scopeDescriptor = editor.getRootScopeDescriptor()
-      if atom.config.get('whitespace.removeTrailingWhitespace', scope: scopeDescriptor)
-        unless atom.config.get('whitespace.ignoreWhitespaceOnlyLines', scope: scopeDescriptor)
+      if atom.config.get('whitespace-enhanced.removeTrailingWhitespace', scope: scopeDescriptor)
+        unless atom.config.get('whitespace-enhanced.ignoreWhitespaceOnlyLines', scope: scopeDescriptor)
           editor.setIndentationForBufferRow(event.range.start.row, 0)
 
     editorDestroyedSubscription = editor.onDidDestroy =>
@@ -56,23 +58,32 @@ class Whitespace
   removeTrailingWhitespace: (editor, grammarScopeName) ->
     buffer = editor.getBuffer()
     scopeDescriptor = editor.getRootScopeDescriptor()
-    ignoreCurrentLine = atom.config.get('whitespace.ignoreWhitespaceOnCurrentLine', scope: scopeDescriptor)
-    ignoreWhitespaceOnlyLines = atom.config.get('whitespace.ignoreWhitespaceOnlyLines', scope: scopeDescriptor)
+    ignoreCurrentLine = atom.config.get('whitespace-enhanced.ignoreWhitespaceOnCurrentLine', scope: scopeDescriptor)
+    ignoreWhitespaceOnlyLines = atom.config.get('whitespace-enhanced.ignoreWhitespaceOnlyLines', scope: scopeDescriptor)
+    ignoreUnmodifiedLines = atom.config.get('whitespace-enhanced.ignoreUnmodifiedLines', scope: scopeDescriptor)
 
-    buffer.backwardsScan /[ \t]+$/g, ({lineText, match, replace}) ->
-      whitespaceRow = buffer.positionForCharacterIndex(match.index).row
-      cursorRows = (cursor.getBufferRow() for cursor in editor.getCursors())
+    promise = if ignoreUnmodifiedLines
+      @getModifiedLines(editor)
+    else
+      Promise.resolve()
 
-      return if ignoreCurrentLine and whitespaceRow in cursorRows
+    promise.then (modifiedLines) ->
+      buffer.backwardsScan /[ \t]+$/g, ({lineText, match, replace, range}) ->
+        return if ignoreUnmodifiedLines and !((range.start.row + 1) in modifiedLines)
 
-      [whitespace] = match
-      return if ignoreWhitespaceOnlyLines and whitespace is lineText
+        whitespaceRow = buffer.positionForCharacterIndex(match.index).row
+        cursorRows = (cursor.getBufferRow() for cursor in editor.getCursors())
 
-      if grammarScopeName is 'source.gfm' and atom.config.get('whitespace.keepMarkdownLineBreakWhitespace')
-        # GitHub Flavored Markdown permits two or more spaces at the end of a line
-        replace('') unless whitespace.length >= 2 and whitespace isnt lineText
-      else
-        replace('')
+        return if ignoreCurrentLine and whitespaceRow in cursorRows
+
+        [whitespace] = match
+        return if ignoreWhitespaceOnlyLines and whitespace is lineText
+
+        if grammarScopeName is 'source.gfm' and atom.config.get('whitespace-enhanced.keepMarkdownLineBreakWhitespace')
+          # GitHub Flavored Markdown permits two or more spaces at the end of a line
+          replace('') unless whitespace.length >= 2 and whitespace isnt lineText
+        else
+          replace('')
 
   ensureSingleTrailingNewline: (editor) ->
     buffer = editor.getBuffer()
@@ -99,3 +110,28 @@ class Whitespace
 
     buffer.transact ->
       buffer.scan new RegExp(spacesText, 'g'), ({replace}) -> replace('\t')
+
+  subscribeToRepository: (editor) ->
+    @repository = repositoryForPath(editor.getPath())
+
+  getModifiedLines: (editor) ->
+    return if editor.isDestroyed()
+
+    if path = editor?.getPath()
+      @repository?.getLineDiffs(path, editor.getText())
+        .catch (e) ->
+          if e.message.match(/does not exist in the given tree/)
+            []
+          else
+            Promise.reject(e)
+        .then (diffs) =>
+          return diffs.reduce (lines, val) ->
+            lineNumber = val.newStart
+            lines.push(lineNumber++) for i in [0...val.newLines]
+
+            return lines
+          , []
+
+        .catch (e) ->
+          console.error('Error getting line diffs for ' + path + ':')
+          console.error(e)
